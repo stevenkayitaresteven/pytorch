@@ -4,14 +4,23 @@ Currently only supports unbacked dynamic shapes.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import Any, TYPE_CHECKING, TypeAlias
 
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
 
+from torch._dynamo.source import LocalSource
 
-__all__ = ["ShapeVar", "IntVar", "TensorSpec"]
+
+__all__ = [
+    "ShapeVar",
+    "IntVar",
+    "TensorSpec",
+    "ParamsSpec",
+    "ShapesSpec",
+    "lookup_spec_from_dynamo_source",
+]
 
 
 class IntVar:
@@ -74,6 +83,12 @@ class ShapeVar(IntVar):
         super().__init__(name, min=min, max=max, optimization_hint=optimization_hint)
 
 
+# Type alias for leaf specs (individual argument specifications)
+LeafSpec: TypeAlias = "TensorSpec | IntVar | None"
+# Any spec — what public APIs accept.
+IntermediateSpec: TypeAlias = LeafSpec
+
+
 class TensorSpec:
     """Per-dimension shape specification for a tensor.
 
@@ -110,5 +125,110 @@ class TensorSpec:
         return iter(self._specs)
 
     def __repr__(self) -> str:
-        entries = ", ".join(repr(spec) for spec in self._specs)
-        return f"TensorSpec([{entries}])"
+        lines = ["TensorSpec("]
+        for i, spec in enumerate(self._specs):
+            lines.append(f"  {i}: {spec!r}")
+        lines.append(")")
+        return "\n".join(lines)
+
+
+class ParamsSpec:
+    """Specification for the arguments of a compiled function.
+
+    Describes the dynamic shape behavior for named arguments, *args, and
+    **kwargs of a ``torch.compile``-wrapped function::
+
+        def f(x, y, *args, **kwargs):
+        #    ^^^^  named_args
+        #           ^^^^^  varargs
+        #                   ^^^^^^  varkw
+
+    Example::
+
+        ParamsSpec({"x": TensorSpec([ShapeVar("batch"), None])})
+    """
+
+    def __init__(
+        self,
+        named_args: dict[str, IntermediateSpec] | None = None,
+        *,
+        varargs: list[IntermediateSpec] | None = None,
+        varkw: dict[str, IntermediateSpec] | None = None,
+    ) -> None:
+        self._named_args: dict[str, LeafSpec] = dict(named_args) if named_args else {}
+        if varargs is not None:
+            raise NotImplementedError("varargs is not supported yet")
+        if varkw is not None:
+            raise NotImplementedError("varkw is not supported yet")
+        self._varargs: list[IntermediateSpec] | None = None
+        self._varkw: dict[str, IntermediateSpec] | None = None
+
+    def __repr__(self) -> str:
+        lines = ["ParamsSpec("]
+        for k, v in self._named_args.items():
+            v_repr = repr(v)
+            if "\n" in v_repr:
+                indented = "\n".join("    " + line for line in v_repr.splitlines())
+                lines.append(f"  {k}:\n{indented}")
+            else:
+                lines.append(f"  {k}: {v_repr}")
+        if self._varargs is not None:
+            lines.append(f"  *args: {self._varargs!r}")
+        if self._varkw is not None:
+            lines.append(f"  **kwargs: {self._varkw!r}")
+        lines.append(")")
+        return "\n".join(lines)
+
+
+class ShapesSpec:
+    """Top-level shape specification for a ``torch.compile`` call.
+
+    ``params`` describes the arguments of the compiled callable — for a raw
+    function this is the function's parameters, for an ``nn.Module`` this
+    is the parameters of ``forward`` (excluding ``self``).
+
+    Currently only ``params`` is supported::
+
+        ShapesSpec(params=ParamsSpec({"x": TensorSpec([ShapeVar("batch"), None])}))
+
+    ``globals`` and ``assumptions`` are reserved for future use and will
+    raise ``NotImplementedError`` if set.
+    """
+
+    def __init__(
+        self,
+        params: ParamsSpec | None = None,
+        globals: Any = None,
+        assumptions: Any = None,
+    ) -> None:
+        if globals is not None:
+            raise NotImplementedError("ShapesSpec.globals is not supported yet")
+        if assumptions is not None:
+            raise NotImplementedError("ShapesSpec.assumptions is not supported yet")
+        self._params = params
+
+    @property
+    def params(self) -> ParamsSpec | None:
+        return self._params
+
+    def __repr__(self) -> str:
+        lines = ["ShapesSpec("]
+        if self._params is not None:
+            param_repr = repr(self._params)
+            indented = "\n".join("    " + line for line in param_repr.splitlines())
+            lines.append(f"  params:\n{indented}")
+        lines.append(")")
+        return "\n".join(lines)
+
+
+def lookup_spec_from_dynamo_source(source, shapes_spec: ShapesSpec | None) -> LeafSpec:
+    """Look up the spec for a function input arg from the shapes_spec.
+
+    Only supports LocalSource with is_input=True (direct function args).
+    Returns TensorSpec, IntVar, or None.
+    """
+    if shapes_spec is None or shapes_spec.params is None:
+        return None
+    if not isinstance(source, LocalSource) or not source.is_input:
+        return None
+    return shapes_spec.params._named_args.get(source.local_name)
