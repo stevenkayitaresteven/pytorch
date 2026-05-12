@@ -131,6 +131,26 @@ _DECOMPOSE_K_PATCH_ROCM = (
 )
 
 
+def _check_triton_source(test_case, code_str, source_check):
+    if config.cpp_wrapper and not config.triton.autotune_at_compile_time:
+        from torch._inductor.codecache import get_path
+
+        FileCheck().check("static const LazyTritonKernelSpec").check(
+            "launchLazyTritonKernel("
+        ).run(code_str)
+        source_keys = re.findall(
+            r'static const char\* \w+_source_key = "([^"]+)";', code_str
+        )
+        test_case.assertTrue(source_keys)
+        sources = []
+        for source_key in source_keys:
+            with open(get_path(source_key, "txt")[2]) as f:
+                sources.append(f.read())
+        source_check.run("\n".join(sources))
+    else:
+        source_check.run(code_str)
+
+
 def benchmark_choice(choice, args, out, expected_out, timings):
     result = choice.benchmark(*args, out=out)
     if expected_out is not None:
@@ -2861,7 +2881,9 @@ class TestMaxAutotune(TestCase):
         for f, args in funcs_and_args:
             c_f = torch.compile(f, mode="max-autotune-no-cudagraphs")
             _, code_out = run_and_get_code(c_f, *args)
-            FileCheck().check(output_code_padding_check).run(code_out[0])
+            _check_triton_source(
+                self, code_out[0], FileCheck().check(output_code_padding_check)
+            )
 
     @parametrize("k", (15, 16))
     @parametrize("dynamic", (False, True))
@@ -4419,23 +4441,7 @@ class TestPrologueFusion(TestCase):
             ).run(code_str)
 
     def check_triton_source(self, code_str, source_check):
-        if config.cpp_wrapper and not config.triton.autotune_at_compile_time:
-            from torch._inductor.codecache import get_path
-
-            FileCheck().check("static const LazyTritonKernelSpec").check(
-                "launchLazyTritonKernel("
-            ).run(code_str)
-            source_keys = re.findall(
-                r'static const char\* \w+_source_key = "([^"]+)";', code_str
-            )
-            self.assertTrue(source_keys)
-            sources = []
-            for source_key in source_keys:
-                with open(get_path(source_key, "txt")[2]) as f:
-                    sources.append(f.read())
-            source_check.run("\n".join(sources))
-        else:
-            source_check.run(code_str)
+        _check_triton_source(self, code_str, source_check)
 
     @parametrize("sizes", ((64, 128, 256), (128, 128, 128), (63, 120, 250)))
     def test_upcast(self, sizes):

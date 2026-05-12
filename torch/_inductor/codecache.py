@@ -3964,7 +3964,7 @@ class CppWrapperCodeCache(CppPythonBindingsCodeCache):
         """
         static PyObject* start_inductor_entry_cpp_py(PyObject* self, PyObject* args) {{
             try {{
-                startLazyTritonKernelCompiles();
+                ensure_triton_kernel_compiles_started();
                 Py_RETURN_NONE;
             }} catch(std::exception const& e) {{
                 PyErr_SetString(PyExc_RuntimeError, e.what());

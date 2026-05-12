@@ -333,9 +333,16 @@ class ComboKernelTests(TestCase):
                 4 if benchmark_combo_kernel else 2,
             )
             # Verify kernels are regular pointwise, not combo kernels
-            FileCheck().check("triton_heuristics.pointwise").check(
+            source_check = FileCheck().check("triton_heuristics.pointwise").check(
                 "'grid_type': 'Grid1D'"
-            ).check_not("combo_grid_meta").run(code[0])
+            ).check_not("combo_grid_meta")
+            if (
+                torch._inductor.config.cpp_wrapper
+                and not torch._inductor.config.triton.autotune_at_compile_time
+            ):
+                self._check_lazy_cpp_wrapper_combo_codegen(code[0], source_check)
+            else:
+                source_check.run(code[0])
 
     @requires_gpu_and_triton
     def test_combo_kernel_per_config_subkernel_poi(self):
