@@ -28,7 +28,7 @@ namespace c10d::symmetric_memory {
 //
 // Device communicators are stored by value in the registry, but methods return
 // references wrapped in std::optional for safe access.
-class NCCLDevCommManager {
+class TORCH_API NCCLDevCommManager {
  public:
   // Constructor
   // @param device The CUDA device this manager is associated with
@@ -98,6 +98,20 @@ class NCCLDevCommManager {
           "NCCL host communicator for group ",
           group_name,
           " not found. Have you rendezvoused any tensor with this group?");
+    }
+    return it->second;
+  }
+
+  // Non-throwing variant of get_comm. Returns nullptr if no comm is
+  // registered for `group_name`. Useful for producers that want to avoid
+  // re-registering when an earlier registration is already in place
+  // (e.g. ProcessGroupNCCL building multiple per-device comms under the
+  // same group name).
+  ncclComm_t get_comm_if_exists(const std::string& group_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto it = group_to_comm_.find(group_name);
+    if (it == group_to_comm_.end()) {
+      return nullptr;
     }
     return it->second;
   }
@@ -175,6 +189,23 @@ class NCCLDevCommManager {
         "NCCL host communicator for group ",
         group_name,
         " already registered.");
+  }
+
+  // Unregister a host-side NCCL communicator and drop any associated device
+  // communicators for the given group. Called by producers (ProcessGroupNCCL
+  // or any external library that registered a ncclComm here) from their
+  // destructor / abort path so that a subsequent process group reusing the
+  // same name can register a fresh ncclComm_t without tripping
+  // register_comm's "already registered" check.
+  //
+  // Safe to call when nothing is registered for `group_name`. Does NOT call
+  // ncclCommDestroy on the host comm — that lifetime is owned by the producer.
+  // Does NOT destroy device communicators either; that happens via the
+  // manager's destructor.
+  void unregister_comm(const std::string& group_name) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    group_to_comm_.erase(group_name);
+    devcomm_registry_.erase(group_name);
   }
 
   // Destructor: Clean up all registered device communicators.
