@@ -699,7 +699,7 @@ class SparseSemiStructuredTensorCUSPARSELT(SparseSemiStructuredTensor):
                 self.shape[0],
                 constraints.dense_min_rows,
                 constraints.dense_min_cols,
-                self.fuse_transpose_cusparselt,
+                True,
                 self.alg_id_cusparselt,
                 should_transpose_dense,
             )
@@ -812,14 +812,10 @@ def _ensure_cusparselt_mm_registered():
             transpose_result=fuse_transpose,
             alg_id=alg_id,
         )
-        if fuse_transpose:
-            res = res.t()
         if need_pad:
             out_cols = m if should_transpose_dense else n
-            return res.narrow(1, 0, out_cols).clone(
-                memory_format=torch.contiguous_format
-            )
-        return res.contiguous()
+            return res.narrow(0, 0, out_cols).contiguous()
+        return res
 
     @cusparselt_mm.register_fake
     def _cusparselt_mm_fake(
@@ -835,8 +831,8 @@ def _ensure_cusparselt_mm_registered():
     ) -> torch.Tensor:
         out_cols = dense.shape[0] if should_transpose_dense else dense.shape[1]
         return torch.empty(
-            out_features,
             out_cols,
+            out_features,
             dtype=dense.dtype,
             device=dense.device,
         )
