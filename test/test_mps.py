@@ -26,7 +26,12 @@ from torch.testing._internal import opinfo
 from torch.testing._internal.common_utils import \
     (gradcheck, gradgradcheck, parametrize, run_tests, TestCase, download_file, MACOS_VERSION, IS_CI,
      NoTest, skipIfSlowGradcheckEnv, suppress_warnings, serialTest, instantiate_parametrized_tests, xfailIf)
-from torch.testing._internal.common_mps import mps_ops_modifier, mps_ops_grad_modifier, mps_ops_error_inputs_modifier
+from torch.testing._internal.common_mps import (
+    assert_mps_match_or_drift,
+    mps_ops_modifier,
+    mps_ops_grad_modifier,
+    mps_ops_error_inputs_modifier,
+)
 from torch.testing import make_tensor
 from torch.testing._internal.common_dtype import get_all_dtypes, integral_types
 import torch.backends.mps
@@ -14052,6 +14057,22 @@ def transform_opinfo_sample_to_cpu(sample, dtype=None):
 
     return cpu_sample
 
+
+def _call_op_ignoring_user_warnings(op, sample):
+    with warnings.catch_warnings():
+        warnings.filterwarnings("ignore", category=UserWarning)
+        return op(sample.input, *sample.args, **sample.kwargs)
+
+
+def _autograd_grad_inputs(op, sample, grad_outputs):
+    """Forward op(sample) and autograd.grad wrt sample's requires_grad tensors."""
+    out = _call_op_ignoring_user_warnings(op, sample)
+    out = (out,) if isinstance(out, torch.Tensor) else tuple(out)
+    leaves = pytree.tree_leaves(([sample.input, *sample.args], sample.kwargs))
+    diff_out = tuple(t for t in out if isinstance(t, torch.Tensor) and t.requires_grad)
+    diff_arg = tuple(t for t in leaves if isinstance(t, torch.Tensor) and t.requires_grad)
+    return torch.autograd.grad(diff_out, diff_arg, grad_outputs=grad_outputs, allow_unused=True)
+
 class TestConsistency(TestCaseMPS):
     # TODO: This is only used while some ops are being added.
     # This list should contain all ops and dtypes eventually
@@ -14311,7 +14332,13 @@ class TestConsistency(TestCaseMPS):
                 self._assert_random_op_match(mps_out, cpu_out)
                 continue
 
-            self.assertEqual(cpu_out, mps_out, atol=atol, rtol=rtol)
+            assert_mps_match_or_drift(
+                self, cpu_out, mps_out,
+                lambda: _call_op_ignoring_user_warnings(
+                    op, transform_opinfo_sample_to_cpu(mps_sample, dtype=torch.float32)
+                ),
+                atol=atol, rtol=rtol, dtype=dtype, label=f"{op.name} {dtype}",
+            )
 
     @ops(mps_ops_grad_modifier(copy.deepcopy(test_consistency_op_db)), allowed_dtypes=MPS_GRAD_DTYPES)
     def test_output_grad_match(self, device, dtype, op):
@@ -14337,7 +14364,13 @@ class TestConsistency(TestCaseMPS):
             if op.name in self.RANDOM_OP_NAMES:
                 self._assert_random_op_match(mps_out, cpu_out)
             else:
-                self.assertEqual(cpu_out, mps_out, atol=atol, rtol=rtol)
+                assert_mps_match_or_drift(
+                    self, cpu_out, mps_out,
+                    lambda: _call_op_ignoring_user_warnings(
+                        op, transform_opinfo_sample_to_cpu(mps_sample, dtype=torch.float32)
+                    ),
+                    atol=atol, rtol=rtol, dtype=dtype, label=f"{op.name} {dtype}",
+                )
 
             #
             # Backward check
@@ -14422,7 +14455,18 @@ class TestConsistency(TestCaseMPS):
             else:
                 # TODO: Handle list inputs later
                 equal_input_types = True
-            self.assertEqual(cpu_grad_inputs, mps_grad_inputs, atol=atol, rtol=rtol, exact_dtype=equal_input_types)
+
+            assert_mps_match_or_drift(
+                self, cpu_grad_inputs, mps_grad_inputs,
+                lambda: _autograd_grad_inputs(
+                    op,
+                    transform_opinfo_sample_to_cpu(mps_sample, dtype=torch.float32),
+                    tuple(g.float() for g in cpu_grad_outputs),
+                ),
+                atol=atol, rtol=rtol, dtype=dtype,
+                label=f"{op.name} {dtype} backward",
+                exact_dtype=equal_input_types,
+            )
 
     # The CPU impl of grid_sampler_3d gives a large amount of error for half
     # precision types. So instead of testing MPS-vs-CPU outputs, test
