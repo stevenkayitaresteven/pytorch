@@ -121,8 +121,8 @@ class NodeReachability:
     Example::
 
         reachability = NodeReachability(list(graph.nodes))
-        reachability.is_ancestor(node_a, node_d)       # True/False
-        reachability.has_dependency(node_a, node_b)     # either direction
+        reachability.is_ancestor(node_a, node_d)  # True/False
+        reachability.has_dependency(node_a, node_b)  # either direction
         reachability.get_unscheduled_ancestors(target, scheduled_set)
 
     Args:
@@ -211,19 +211,20 @@ class _BitsetAncestorView:
 
     Supported operations (all use the node-to-index mapping for translation)::
 
-        node_a in view          # O(1) -- test bit at node_a's index
-        for a in view: ...      # iterate ancestors via lowest-bit scan
-        len(view)               # popcount via int.bit_count()
-        view & other_view       # bitwise AND then scan set bits
-        view & ordered_set      # iterate smaller set, test membership
+        node_a in view  # O(1) -- test bit at node_a's index
+        for a in view:
+            ...  # iterate ancestors via lowest-bit scan
+        len(view)  # popcount via int.bit_count()
+        view & other_view  # bitwise AND then scan set bits
+        view & ordered_set  # iterate smaller set, test membership
 
     Example::
 
         ancestors = BitsetAncestors(nodes)
         view = ancestors[some_node]
-        if predecessor in view:       # O(1) bit test
+        if predecessor in view:  # O(1) bit test
             print("predecessor is an ancestor")
-        for a in view:                # iterate all ancestors
+        for a in view:  # iterate all ancestors
             print(a.name)
     """
 
@@ -246,6 +247,7 @@ class _BitsetAncestorView:
         return bool((self._bits >> idx) & 1)
 
     def __iter__(self):
+        """Iterate set bits from lowest to highest using x & -x isolation."""
         bits = self._bits
         idx_to_node = self._idx_to_node
         while bits:
