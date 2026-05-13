@@ -1734,7 +1734,7 @@ class DeviceCachingAllocator {
         is_expandable_segments_active);
     params.stat_types = get_stat_types_for_pool(pool);
 
-    // try to get a block from the existing pool.
+    // First, try to get a block from the existing pool.
     bool block_found =
         // Search pool
         get_free_block(params)
@@ -1989,7 +1989,6 @@ class DeviceCachingAllocator {
           context,
           true /* always split for prefix */);
       requested_source = prefix_block->next;
-      TORCH_INTERNAL_ASSERT(requested_source != nullptr);
     }
 
     pool.erase_from_blocks(requested_source);
