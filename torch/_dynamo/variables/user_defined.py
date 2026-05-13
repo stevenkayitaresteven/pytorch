@@ -1963,6 +1963,76 @@ class UserDefinedObjectVariable(UserDefinedVariable):
             ).call_function(tx, [key], {})
         return super().mp_subscript_impl(tx, key)
 
+    def sq_repeat_impl(
+        self,
+        tx: "InstructionTranslator",
+        count: VariableTracker,
+    ) -> VariableTracker:
+        # CPython's slot wrapper for ``__mul__`` on a list/tuple subclass that
+        # doesn't override ``__mul__`` calls the base class's sq_repeat,
+        # producing a plain list/tuple (not the subclass).  Delegate to the
+        # inner _base_vt which has the right sq_repeat_impl.
+        if self._base_vt is not None:
+            return self._base_vt.sq_repeat_impl(tx, count)
+        return super().sq_repeat_impl(tx, count)
+
+    def sq_inplace_repeat_impl(
+        self,
+        tx: "InstructionTranslator",
+        count: VariableTracker,
+    ) -> VariableTracker:
+        if self._base_vt is not None:
+            return self._base_vt.sq_inplace_repeat_impl(tx, count)
+        return super().sq_inplace_repeat_impl(tx, count)
+
+    def _vectorcall_maybe(
+        self,
+        tx: "InstructionTranslator",
+        name: str,
+        args: list[VariableTracker],
+    ) -> VariableTracker:
+        # Mirrors CPython's vectorcall_maybe: lookup `name` on the type's MRO
+        # (NOT the instance), bind via the descriptor protocol, and call.
+        # Returns NotImplemented if the attribute is missing.
+        #
+        # Crucially, this must NOT route through `call_method`, since
+        # `call_method` re-dispatches dunders like __add__ back through
+        # nb_<op>_impl -> SLOT1BIN, causing infinite recursion when the
+        # type's __<op>__ is a C-implemented slot wrapper that has no
+        # Python override.
+        # ref: https://github.com/python/cpython/blob/v3.13.0/Objects/typeobject.c#L2968-L2989
+        method = self._maybe_get_baseclass_method(name)
+        if method is None:
+            return variables.ConstantVariable.create(NotImplemented)
+        # Delegate to _base_vt for non-overridden base-class methods
+        # (e.g. UserDict, list/tuple subclasses) — mirrors the same
+        # delegation in `call_method`.
+        if (
+            self._base_vt is not None
+            and self._base_methods is not None
+            and method in self._base_methods
+        ):
+            return self._base_vt.call_method(tx, name, list(args), {})
+        if not isinstance(method, types.FunctionType):
+            # C-implemented method descriptors / slot wrappers (e.g.
+            # Tensor.__add__) cannot be invoked here without re-entering the
+            # nb_<op>_impl -> SLOT1BIN dispatch via call_method, which would
+            # infinitely recurse. Graph-break instead and let the outer
+            # binary-op machinery fall back.
+            unimplemented(
+                gb_type="vectorcall_maybe on C method descriptor",
+                context=f"name={name}, type={self.python_type_name()}, method={method}",
+                explanation=(
+                    f"Cannot trace special method '{name}' implemented in C "
+                    f"on user-defined type '{self.python_type_name()}'."
+                ),
+                hints=[*graph_break_hints.SUPPORTABLE],
+            )
+        method_var = self.resolve_type_attr(tx, name, method, self.source)
+        # resolve_type_attr returns a bound callable (self already bound via
+        # the descriptor protocol), so we pass only the remaining args.
+        return method_var.call_function(tx, list(args), {})  # type: ignore[arg-type]
+
     def SLOT1BIN(
         self,
         tx: "InstructionTranslator",
@@ -2053,12 +2123,12 @@ class UserDefinedObjectVariable(UserDefinedVariable):
                     rdunder
                 ) != other_._maybe_get_baseclass_method(rdunder)
                 if method_is_overloaded:
-                    r = other_.call_method(tx, rdunder, [self_], {})
+                    r = other_._vectorcall_maybe(tx, rdunder, [self_])
                     if not is_nb_not_implemented(r):
                         return r
                     do_other = False
 
-            r = self_.call_method(tx, dunder, [other_], {})
+            r = self_._vectorcall_maybe(tx, dunder, [other_])
             if not is_nb_not_implemented(r) or py_is_type(o_type, s_type):
                 return r
 
@@ -2067,11 +2137,27 @@ class UserDefinedObjectVariable(UserDefinedVariable):
                 raise AssertionError(
                     f"Expected UserDefinedObjectVariable, got {type(other_)}"
                 )
-            r = other_.call_method(tx, rdunder, [self_], {})  # infinite recursion??
-            if not is_nb_not_implemented(r):
-                return r
+            if other_._maybe_get_baseclass_method(rdunder):
+                r = other_._vectorcall_maybe(tx, rdunder, [self_])
+                if not is_nb_not_implemented(r):
+                    return r
 
         return variables.ConstantVariable.create(NotImplemented)
+
+    def nb_multiply_impl(
+        self,
+        tx: "InstructionTranslator",
+        other: VariableTracker,
+        reverse: bool = False,
+    ) -> VariableTracker:
+        return self.SLOT1BIN(
+            tx,
+            other,
+            "__mul__",
+            "__rmul__",
+            nb_slot=PyNumberSlots.NB_MULTIPLY,
+            reverse=reverse,
+        )
 
     def nb_or_impl(
         self,
@@ -2120,6 +2206,13 @@ class UserDefinedObjectVariable(UserDefinedVariable):
     ) -> VariableTracker:
         # ref: https://github.com/python/cpython/blob/3.13/Objects/typeobject.c#L10362-L10363
         return self.call_method(tx, "__isub__", [other], {})
+
+    def nb_inplace_multiply_impl(
+        self,
+        tx: "InstructionTranslator",
+        other: VariableTracker,
+    ) -> VariableTracker:
+        return self.call_method(tx, "__imul__", [other], {})
 
     def call_method(
         self,
