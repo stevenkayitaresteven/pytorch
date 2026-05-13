@@ -2,11 +2,9 @@
 import collections
 import functools
 import warnings
-from typing import Any
 
 import torch
 from torch.types import _dtype
-import types
 
 
 try:
@@ -341,7 +339,12 @@ class autocast:
 
         return self
 
-    def __exit__(self, exc_type: type[BaseException] | None, exc_val: BaseException | None, exc_tb: types.TracebackType | None):  # type: ignore[override]
+    def __exit__(
+        self,
+        exc_type: object,
+        exc_val: object,
+        exc_tb: object,
+    ):  # type: ignore[override]
         if torch._jit_internal.is_scripting():
             return
 
