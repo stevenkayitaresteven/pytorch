@@ -46,6 +46,30 @@ Placement.__hash__ = functools.partial(_raise_error, method_name="__hash__")
 Placement.__fx_repr__ = functools.partial(_raise_error, method_name="__fx_repr__")
 
 
+def _hint_proves_even_shard(size: IntLikeType, num_chunks: int) -> bool:
+    from torch.fx.experimental.symbolic_shapes import (
+        free_unbacked_symbols,
+        guard_or_false,
+        optimization_hint,
+    )
+
+    if guard_or_false(size % num_chunks == 0):
+        return True
+    if not (
+        isinstance(size, torch.SymInt)
+        and (shape_env := getattr(size.node, "shape_env", None)) is not None
+        and (unbacked_symbols := free_unbacked_symbols(size.node.expr))
+        and unbacked_symbols.issubset(shape_env.var_to_hint_override.keys())
+        and optimization_hint(size, fallback=None) % num_chunks == 0
+    ):
+        return False
+
+    # Padding decisions require a Python branch. Only explicit hint overrides
+    # can justify skipping padding for otherwise data-dependent sharding.
+    torch._check(size % num_chunks == 0)
+    return True
+
+
 class Shard(torch._C._distributed.Shard):
     """
     The ``Shard(dim)`` placement describes the DTensor sharding on tensor dimension
@@ -371,8 +395,11 @@ class Shard(torch._C._distributed.Shard):
             # which should be an empty tensor
             return tensor
 
-        # Assume padding (uneven sharding) as general case for unbacked sizes.
-        is_padded = guard_or_true(tensor.size(self.dim) % num_chunks != 0)
+        # Assume padding (uneven sharding) as general case for unbacked sizes,
+        # unless an optimization hint can prove the even-shard branch.
+        is_padded = not _hint_proves_even_shard(
+            tensor.size(self.dim), num_chunks
+        ) and guard_or_true(tensor.size(self.dim) % num_chunks != 0)
         pad_sizes = None
         if is_padded:
             scattered_list, pad_sizes = self._split_tensor(
@@ -403,8 +430,11 @@ class Shard(torch._C._distributed.Shard):
     ) -> torch.Tensor:
         from torch.fx.experimental.symbolic_shapes import guard_or_true
 
-        # Assume padding (uneven sharding) as general case for unbacked sizes.
-        is_padded = guard_or_true(logical_dim_size % num_chunks != 0)
+        # Assume padding (uneven sharding) as general case for unbacked sizes,
+        # unless an optimization hint can prove the even-shard branch.
+        is_padded = not _hint_proves_even_shard(
+            logical_dim_size, num_chunks
+        ) and guard_or_true(logical_dim_size % num_chunks != 0)
 
         if is_padded:
             full_chunk_size = (logical_dim_size + num_chunks - 1) // num_chunks
@@ -425,8 +455,11 @@ class Shard(torch._C._distributed.Shard):
     ) -> torch.Tensor:
         from torch.fx.experimental.symbolic_shapes import guard_or_false, guard_or_true
 
-        # Assume padding (uneven sharding) as general case for unbacked sizes.
-        is_padded = guard_or_true(logical_dim_size % num_chunks != 0)
+        # Assume padding (uneven sharding) as general case for unbacked sizes,
+        # unless an optimization hint can prove the even-shard branch.
+        is_padded = not _hint_proves_even_shard(
+            logical_dim_size, num_chunks
+        ) and guard_or_true(logical_dim_size % num_chunks != 0)
 
         if is_padded:
             full_chunk_size = (logical_dim_size + num_chunks - 1) // num_chunks

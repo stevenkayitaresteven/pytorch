@@ -3,12 +3,15 @@ import copy
 import itertools
 
 import torch
+from torch._subclasses import FakeTensorMode
 from torch.distributed.tensor.placement_types import (
+    _hint_proves_even_shard,
     _StridedShard,
     Partial,
     Replicate,
     Shard,
 )
+from torch.fx.experimental.symbolic_shapes import ShapeEnv
 from torch.testing._internal.common_utils import run_tests, TestCase
 
 
@@ -143,6 +146,32 @@ class PlacementTypesTestCase(TestCase):
                 index=symint_index,
                 with_padding=True,
             )
+
+    def test_hinted_unbacked_even_shard_skips_padding(self):
+        fake_mode = FakeTensorMode(allow_non_fake_inputs=True, shape_env=ShapeEnv())
+        shard = Shard(0)
+
+        with fake_mode:
+            dim_size = fake_mode.shape_env.create_unbacked_symint()
+            torch._dynamo.override_optimization_hint(dim_size, 8)
+            local_tensor = torch.empty(dim_size // 4, 4)
+            full_tensor = torch.empty(dim_size, 4)
+
+            padded = shard._maybe_pad_tensor(local_tensor, dim_size, 4)
+            unpadded = shard._maybe_unpad_tensor(full_tensor, dim_size, 4)
+
+        self.assertEqual(padded.shape, local_tensor.shape)
+        self.assertEqual(unpadded.shape, full_tensor.shape)
+
+    def test_unbacked_even_fallback_hint_requires_override(self):
+        fake_mode = FakeTensorMode(allow_non_fake_inputs=True, shape_env=ShapeEnv())
+
+        with fake_mode:
+            dim_size = fake_mode.shape_env.create_unbacked_symint()
+            self.assertFalse(_hint_proves_even_shard(dim_size, 4))
+
+            torch._dynamo.override_optimization_hint(dim_size, 8)
+            self.assertTrue(_hint_proves_even_shard(dim_size, 4))
 
 
 if __name__ == "__main__":
