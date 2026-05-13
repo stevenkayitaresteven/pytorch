@@ -15892,9 +15892,6 @@ op_db: list[OpInfo] = [
             DecorateInfo(unittest.expectedFailure, "TestCommon", "test_noncontiguous_samples"),
             # composite compliance fails with "performing in-place operation add_"
             DecorateInfo(unittest.expectedFailure, "TestCompositeCompliance", "test_backward"),
-            # sometimes fails in TorchScript interpreter with failures associated with
-            # batch_norm
-            DecorateInfo(unittest.expectedFailure, "TestLazyOpInfo", "test_correctness"),
             # lazy dispatch failure
             DecorateInfo(unittest.expectedFailure, "TestLazyOpInfo", "test_dispatched_to_lazy"),
         ),
