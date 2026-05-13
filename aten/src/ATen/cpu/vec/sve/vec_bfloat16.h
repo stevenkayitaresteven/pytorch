@@ -610,30 +610,28 @@ void inline transpose_mxn<BFloat16>(
   }
   constexpr int TILE = 8;
 
-  alignas(64) BFloat16 tile_in[TILE * TILE];
-  alignas(64) BFloat16 tile_out[TILE * TILE];
+  alignas(64) bfloat16_t tile_in[TILE * TILE];
+  alignas(64) bfloat16_t tile_out[TILE * TILE];
 
-  // Predicated bf16 load with zeroing of inactiva lanes as raw 16-bit lanes
-  auto ld_bf16_u16_zeroed = [](const BFloat16* p, int count) -> svuint16_t {
-    svuint16_t z = svdup_n_u16(0);
+  // Predicated bf16 load with zeroing of inactive lanes
+  auto ld_bf16_zeroed = [](const bfloat16_t* p, int count) -> svbfloat16_t {
+    svbfloat16_t z = svreinterpret_bf16_u16(svdup_n_u16(0));
     if (count <= 0) {
       return z;
     }
     // Works for any count<= vector lanes
     svbool_t pg = svwhilelt_b16((uint64_t)0, (uint64_t)count);
-    const uint16_t* pu16 = reinterpret_cast<const uint16_t*>(p);
-    svuint16_t v = svld1_u16(pg, pu16);
-    return svsel_u16(pg, v, z);
+    svbfloat16_t v = svld1_bf16(pg, p);
+    return svsel_bf16(pg, v, z);
   };
 
-  // Predicated bf16 store as raw 16-bit lanes(only those active will be stored)
-  auto st_bf16_u16 = [](BFloat16* p, int count, svuint16_t v) {
+  // Predicated bf16 store (only those active will be stored)
+  auto st_bf16 = [](bfloat16_t* p, int count, svbfloat16_t v) {
     if (count <= 0) {
       return;
     }
     svbool_t pg = svwhilelt_b16((uint64_t)0, (uint64_t)count);
-    uint16_t* pu16 = reinterpret_cast<uint16_t*>(p);
-    svst1_u16(pg, pu16, v);
+    svst1_bf16(pg, p, v);
   };
 
   for (int i0 = 0; i0 < M; i0 += TILE) {
@@ -645,19 +643,20 @@ void inline transpose_mxn<BFloat16>(
       // Use SVE load+store(from the helpers above) into each row
       for (int r = 0; r < TILE; r++) {
         for (int c = 0; c < TILE; c++) {
-          tile_in[r * TILE + c] = BFloat16(0);
+          tile_in[r * TILE + c] = bfloat16_t{};
         }
         if (r < m_blk) {
-          const BFloat16* srow = src + (i0 + r) * ld_src + j0;
-          svuint16_t v = ld_bf16_u16_zeroed(srow, n_blk);
-          st_bf16_u16(tile_in + r * TILE, n_blk, v);
+          const bfloat16_t* srow =
+              reinterpret_cast<const bfloat16_t*>(src + (i0 + r) * ld_src + j0);
+          svbfloat16_t v = ld_bf16_zeroed(srow, n_blk);
+          st_bf16(tile_in + r * TILE, n_blk, v);
         }
       }
 
       // Transpose tile_in to tile_out (scalar on tiny tile)
       for (int r = 0; r < TILE; r++) {
         for (int c = 0; c < TILE; c++) {
-          tile_out[r * TILE + c] = BFloat16(0);
+          tile_out[r * TILE + c] = bfloat16_t{};
         }
       }
       for (int r = 0; r < m_blk; r++) {
@@ -669,8 +668,8 @@ void inline transpose_mxn<BFloat16>(
       // Store tile_out to dst with SVE store(from the helpers above)
       for (int r = 0; r < n_blk; r++) {
         BFloat16* drow = dst + (j0 + r) * ld_dst + i0;
-        svuint16_t v = ld_bf16_u16_zeroed(tile_out + r * TILE, m_blk);
-        st_bf16_u16(drow, m_blk, v);
+        svbfloat16_t v = ld_bf16_zeroed(tile_out + r * TILE, m_blk);
+        st_bf16(reinterpret_cast<bfloat16_t*>(drow), m_blk, v);
       }
     }
   }
